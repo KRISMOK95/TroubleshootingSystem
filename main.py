@@ -1,8 +1,12 @@
 import time
+from queue import Queue
 import paho.mqtt.client as mqtt
 import ast
 import threading
+
 global_data = None
+troubleshooting_ongoing = False
+SENTINEL = "sentinel"
 
 #region MQTT
 
@@ -28,10 +32,37 @@ client.connect(MQTT_BROKER, 1883)
 client.on_message = on_message
 client.subscribe(MQTT_TOPIC)
 #client.loop_start()
+mqtt_queue = Queue()
+input_queue = Queue()
 
 def mqtt_client_loop():
+    global global_data
     while True:
         client.loop(timeout=1.0)
+        if global_data is not None:
+            mqtt_queue.put(global_data)
+            global_data = None
+        else:
+            mqtt_queue.put(SENTINEL)
+        time.sleep(1)
+
+mqtt_thread = threading.Thread(target=mqtt_client_loop)
+mqtt_thread.start()
+
+# Add a new function to handle user inputs in a separate thread
+def user_input_loop():
+    while True:
+        try:
+            user_input = input()
+            input_queue.put(user_input)
+        except EOFError:
+            pass
+        time.sleep(1)
+
+# Start a new thread for the user_input_loop
+user_input_thread = threading.Thread(target=user_input_loop)
+user_input_thread.start()
+
 
 #endregion
 
@@ -100,9 +131,14 @@ print("Suggested solutions:", solutions)
 
 def ask_question(question):
     print(question)
-    return input().lower()
+    time.sleep(0.5)  # wait for 0.5 seconds
+    print("Waiting for user input...")
+    return input_queue.get().lower()
+
 
 def troubleshoot_AL22():
+    global troubleshooting_ongoing
+    troubleshooting_ongoing = True
     if ask_question("AL22 is being generated? (y/n): ") == "y":
         print("AL22: Circulating fluid discharge temp. sensor failure.")
         return
@@ -155,11 +191,23 @@ def troubleshoot_AL22():
         else:
             print("Electronic expansion valve, which is a part of the refrigerant circuit, needs to be replaced. Only a specialized operator is allowed to handle the refrigerant circuit.")
             return
+    troubleshooting_ongoing = False
+
 #endregion
 
 #region Alarm flag
 def process_alarm_flags():
-    global global_data
+
+    global troubleshooting_ongoing
+    if troubleshooting_ongoing:
+        return
+
+    if mqtt_queue.empty():
+        return
+    global_data = mqtt_queue.get()
+
+    if global_data == SENTINEL:
+        return
 
     AF22 = False
 
@@ -246,4 +294,3 @@ def process_alarm_flags():
 
 while True:
     process_alarm_flags()
-    time.sleep(1)
